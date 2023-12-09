@@ -22,16 +22,16 @@ tf.config.experimental.set_memory_growth(gpus[0], True)
 tf.config.run_functions_eagerly(True)
 tf.keras.utils.set_random_seed(0)
 
-
 INPUT_SIZE = 224
-MAX_FILTER_SIZE = 128
+MAX_FILTER_SIZE = 200
+BATCH_SIZE = 32
 
 def build_data_generator(trial, path):
     data_generator = ImageDataGenerator(rescale=1./255)
     return data_generator.flow_from_directory(
               path,
               target_size=(INPUT_SIZE, INPUT_SIZE),
-              batch_size=32,
+              batch_size=BATCH_SIZE,
               class_mode='categorical')
 
 
@@ -43,9 +43,9 @@ def create_model(trial):
     for i in range(n_layers):
         # Suggest the number of filters, kernel size, and activation
         n_filters = trial.suggest_int('n_filters_{}'.format(i), 32, MAX_FILTER_SIZE, step=32)
-        kernel_size = trial.suggest_int('kernel_size_{}'.format(i), 3, 7, step=2)
+        kernel_size = trial.suggest_int('kernel_size_{}'.format(i), 3, 5, step=2)
         activation = trial.suggest_categorical('activation_{}'.format(i), ['relu', 'elu'])
-        model.add(Conv2D(n_filters, (3, 3), 
+        model.add(Conv2D(n_filters, (kernel_size, kernel_size), 
                          activation=activation))
         model.add(MaxPooling2D((2, 2)))
 
@@ -82,12 +82,21 @@ def objective(trial):
     history = model.fit(
         train_generator,
         steps_per_epoch=len(train_generator),
-        epochs=10,
+        epochs=20,
         validation_data=validation_generator,
         validation_steps=len(validation_generator),
         verbose=0,
         callbacks=callbacks
     )
+
+    # Save the model and history
+    keras_dict = {
+      'model': model,
+      'history': history
+    }
+    with open(f"model_obj_{trial.number}.pickle", "wb") as f:
+        pickle.dump(keras_dict, f)
+
     return history.history['val_acc'][-1]
 
 
@@ -98,6 +107,12 @@ if __name__ == '__main__':
     parser.add_argument('--n_trials', type=int, required=True)
     args = parser.parse_args()
 
+    # Define pruner and samplers
+    pruner = optuna.pruners.SuccessiveHalvingPruner(min_early_stopping_rate=1)
+    sampler = optuna.samplers.TPESampler(multivariate=True, 
+                                         warn_independent_sampling=False)
+    sampler_name = f'{args.study_name}_sampler.pkl'
+
     # If the first time the study has been run save the sampler
     db_exists = os.path.exists(f"{args.study_name}.db")
     if not db_exists:
@@ -105,21 +120,23 @@ if __name__ == '__main__':
             direction='maximize', 
             storage=f"sqlite:///{args.study_name}.db",
             study_name=args.study_name,
-            load_if_exists=True
+            pruner=pruner,
+            sampler=sampler,
         )
         study.optimize(objective, n_trials=args.n_trials, gc_after_trial=True)
         # Save the sampler
-        with open(f'{args.study_name}_sampler.pkl', 'wb') as f:
+        with open(sampler_name, 'wb') as f:
             pickle.dump(study.sampler, f)
     else:
     # if the study has been run before load the sampler
-        restored_sampler = pickle.load(open("sampler.pkl", "rb"))
+        restored_sampler = pickle.load(open(sampler_name, "rb"))
         study = optuna.create_study(
             direction='maximize', 
             storage=f"sqlite:///{args.study_name}.db",
             study_name=args.study_name,
+            pruner=pruner,
             load_if_exists=True,
-            sammpler=restored_sampler
+            sampler=restored_sampler
         ) 
         study.optimize(objective, n_trials=args.n_trials, gc_after_trial=True)
 
